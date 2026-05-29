@@ -1,268 +1,278 @@
-# 🌐 تطبيق مبيعات Flask + SQLite + تصدير Excel/PDF (نسخة محسّنة)
-# شغّل: python app.py ثم افتح http://127.0.0.1:5000
-
-from flask import Flask, request, redirect, url_for, render_template_string, jsonify, send_file
 import sqlite3
-from datetime import datetime
 import io
-
-# Excel
-from openpyxl import Workbook
-
-# PDF
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
-from reportlab.lib import colors
+import csv
+from flask import Flask, render_template_string, request, redirect, url_for, jsonify, make_response
 
 app = Flask(__name__)
-DB_FILE = "sales.db"
 
-# =========================
-# Database Layer
-# =========================
-def get_db():
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
+# 1. إنشاء وقراءة قاعدة البيانات (SQLite)
 def init_db():
-    with get_db() as conn:
-        conn.execute("""
+    conn = sqlite3.connect('sales.db')
+    cursor = conn.cursor()
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS sales (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             product TEXT NOT NULL,
             price REAL NOT NULL,
             cost REAL NOT NULL,
             profit REAL NOT NULL,
-            date TEXT NOT NULL
+            date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        """)
-
-
-def get_all_sales():
-    try:
-        with get_db() as conn:
-            rows = conn.execute("SELECT * FROM sales ORDER BY date ASC").fetchall()
-            return [dict(r) for r in rows]
-    except Exception as e:
-        print("DB Error:", e)
-        return []
-
+    ''')
+    conn.commit()
+    conn.close()
 
 def insert_sale(product, price, cost):
-    try:
-        with get_db() as conn:
-            conn.execute(
-                "INSERT INTO sales (product, price, cost, profit, date) VALUES (?, ?, ?, ?, ?)",
-                (product, price, cost, price - cost, datetime.now().strftime('%Y-%m-%d %H:%M'))
-            )
-    except Exception as e:
-        print("Insert Error:", e)
+    price_val = float(price) if price else 0.0
+    cost_val = float(cost) if cost else 0.0
+    profit = price_val - cost_val
+    
+    conn = sqlite3.connect('sales.db')
+    cursor = conn.cursor()
+    cursor.execute('INSERT INTO sales (product, price, cost, profit) VALUES (?, ?, ?, ?)',
+                   (product, price_val, cost_val, profit))
+    conn.commit()
+    conn.close()
 
-# =========================
-# Templates
-# =========================
-BASE = """
-<!doctype html>
+def get_all_sales():
+    conn = sqlite3.connect('sales.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, product, price, cost, profit, date FROM sales ORDER BY id DESC')
+    rows = cursor.fetchall()
+    conn.close()
+    
+    sales_list = []
+    for row in rows:
+        sales_list.append({
+            'id': row[0],
+            'product': row[1],
+            'price': row[2],
+            'cost': row[3],
+            'profit': row[4],
+            'date': row[5]
+        })
+    return sales_list
+
+# 2. واجهة المستخدم الرسومية (HTML + CSS + Chart.js)
+HTML_TEMPLATE = """
+<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>نظام المبيعات</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<style>
-body{font-family:system-ui;background:#0f172a;color:#e5e7eb;margin:0}
-.container{max-width:900px;margin:auto;padding:16px}
-.card{background:#111827;padding:16px;margin-bottom:12px;border-radius:12px}
-input,button{width:100%;padding:10px;margin:6px 0;background:#020617;color:white;border:1px solid #374151}
-.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.btns{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-</style>
+    <meta charset="UTF-8">
+    <title>نظام إدارة المبيعات الأنيق</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; margin: 0; padding: 20px; color: #333; }
+        .container { max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+        h1, h2 { color: #2c3e50; border-bottom: 2px solid #ecf0f1; padding-bottom: 10px; }
+        form { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)) auto; gap: 15px; margin-bottom: 30px; background: #f8f9fa; padding: 20px; border-radius: 8px; align-items: end; }
+        .form-group { display: flex; flex-direction: column; gap: 5px; }
+        label { font-weight: bold; font-size: 14px; }
+        input { padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 16px; }
+        button { background-color: #27ae60; color: white; border: none; padding: 11px 20px; font-size: 16px; border-radius: 6px; cursor: pointer; font-weight: bold; transition: 0.2s; }
+        button:hover { background-color: #219653; }
+        .btn-export { background-color: #2980b9; margin-left: 10px; }
+        .btn-export:hover { background-color: #2471a3; }
+        .btn-pdf { background-color: #e74c3c; }
+        .btn-pdf:hover { background-color: #c0392b; }
+        .actions { margin-bottom: 20px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; text-align: right; }
+        th, td { padding: 12px 15px; border-bottom: 1px solid #ddd; }
+        th { background-color: #34495e; color: white; }
+        tr:hover { background-color: #f1f2f6; }
+        .chart-container { max-width: 600px; margin: 30px auto; }
+    </style>
 </head>
 <body>
-<div class="container">
-<h2>📊 نظام المبيعات</h2>
-{{content|safe}}
-</div>
+    <div class="container">
+        <h1>📊 لوحة تحكم المبيعات والأرباح</h1>
+        
+        <form action="/add" method="POST">
+            <div class="form-group">
+                <label>اسم المنتج</label>
+                <input type="text" name="product" required placeholder="مثال: عطر لوريت">
+            </div>
+            <div class="form-group">
+                <label>سعر البيع ($)</label>
+                <input type="number" step="0.01" name="price" required placeholder="0.00">
+            </div>
+            <div class="form-group">
+                <label>التكلفة ($)</label>
+                <input type="number" step="0.01" name="cost" required placeholder="0.00">
+            </div>
+            <button type="submit">إضافة المنتج</button>
+        </form>
+
+        <div class="actions">
+            <a href="/export/excel"><button class="btn-export">📥 تصدير Excel</button></a>
+            <a href="/export/pdf" target="_blank"><button class="btn-pdf">🖨️ طباعة / حفظ PDF</button></a>
+        </div>
+
+        <div class="chart-container">
+            <canvas id="salesChart"></canvas>
+        </div>
+
+        <h2>📋 سجل العمليات المدخلة</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>المعرف</th>
+                    <th>اسم المنتج</th>
+                    <th>سعر البيع</th>
+                    <th>التكلفة</th>
+                    <th>الربح الصافي</th>
+                    <th>التاريخ</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for sale in sales %}
+                <tr>
+                    <td>{{ sale.id }}</td>
+                    <td>{{ sale.product }}</td>
+                    <td>${{ sale.price }}</td>
+                    <td>${{ sale.cost }}</td>
+                    <td style="color: {{ 'green' if sale.profit >= 0 else 'red' }}">${{ sale.profit }}</td>
+                    <td>{{ sale.date }}</td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="6" style="text-align: center; color: #7f8c8d;">لا توجد بيانات مدخلة حالياً. ابدأ بإضافة منتج!</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        // جلب البيانات للرسم البياني وتجنب خطأ [object Object]
+        const salesData = {{ sales | tojson }};
+        
+        if (salesData.length > 0) {
+            // عكس المصفوفة ليعرض الرسم البياني من الأقدم إلى الأحدث
+            const dataReversed = [...salesData].reverse();
+            const labels = dataReversed.map(item => item.product);
+            const profits = dataReversed.map(item => item.profit);
+
+            const ctx = document.getElementById('salesChart').getContext('2d');
+            new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'صافي الربح لكل منتج ($)',
+                        data: profits,
+                        backgroundColor: 'rgba(39, 174, 96, 0.6)',
+                        borderColor: 'rgba(39, 174, 96, 1)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: { y: { beginAtZero: true } }
+                }
+            });
+        } else {
+            // في حال عدم وجود بيانات، يظهر رسم فارغ لطيف دون كسر الصفحة
+            const ctx = document.getElementById('salesChart').getContext('2d');
+            ctx.font = "16px sans-serif";
+            ctx.fillStyle = "#7f8c8d";
+            ctx.textAlign = "center";
+            ctx.fillText("أضف منتجات ليظهر الرسم البياني هنا", ctx.canvas.width/2, ctx.canvas.height/2);
+        }
+    </script>
 </body>
 </html>
 """
 
-HOME = """
-<div class="card">
-<form method="post" action="/add">
-<div class="row">
-<input name="product" placeholder="اسم المنتج" required>
-<input name="price" placeholder="السعر" required>
-</div>
-<input name="cost" placeholder="التكلفة" required>
-<button type="submit">➕ إضافة</button>
-</form>
-</div>
-
-<div class="card btns">
-<a href="/export/excel">📥 تصدير Excel</a>
-<a href="/export/pdf">📄 تصدير PDF</a>
-</div>
-
-<div class="card">
-<canvas id="chart"></canvas>
-</div>
-
-<script>
-try {
-  const data = {{ chart_data | tojson }};
-
-  if (!Array.isArray(data)) {
-    throw new Error("Invalid chart data format");
-  }
-
-  const labels = data.map(x => x.date || "");
-  const profits = data.map(x => Number(x.profit || 0));
-
-  if (labels.length > 0) {
-    new Chart(document.getElementById('chart'), {
-      type: 'line',
-      data: {
-        labels: labels,
-        datasets: [{
-          label: 'الأرباح اليومية',
-          data: profits
-        }]
-      }
-    });
-  }
-} catch(e) {
-  console.error("Chart Error:", e);
-}
-</script>
-"""
-
-# =========================
-# Logic
-# =========================
-def calculate_daily(data):
-    if not isinstance(data, list):
-        return []
-
-    daily = {}
-    for s in data:
-        try:
-            d = (s.get("date") or "").split(" ")[0]
-            if not d:
-                continue
-            daily[d] = daily.get(d, 0) + float(s.get("profit", 0))
-        except Exception:
-            continue
-
-    return [
-        {"date": k, "profit": round(v, 2)}
-        for k, v in sorted(daily.items())
-    ]
-
-# =========================
-# Export Excel
-# =========================
-@app.route('/export/excel')
-def export_excel():
-    data = get_all_sales()
-
-    wb = Workbook()
-    ws = wb.active
-
-    ws.append(["ID", "Product", "Price", "Cost", "Profit", "Date"])
-
-    for s in data:
-        ws.append([
-            s.get("id"),
-            s.get("product"),
-            s.get("price"),
-            s.get("cost"),
-            s.get("profit"),
-            s.get("date")
-        ])
-
-    stream = io.BytesIO()
-    wb.save(stream)
-    stream.seek(0)
-
-    return send_file(stream, as_attachment=True, download_name="sales.xlsx")
-
-# =========================
-# Export PDF
-# =========================
-@app.route('/export/pdf')
-def export_pdf():
-    data = get_all_sales()
-
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer)
-
-    table_data = [["ID", "Product", "Price", "Cost", "Profit", "Date"]]
-
-    for s in data:
-        table_data.append([
-            s.get("id"),
-            s.get("product"),
-            s.get("price"),
-            s.get("cost"),
-            s.get("profit"),
-            s.get("date")
-        ])
-
-    table = Table(table_data)
-    table.setStyle(TableStyle([
-        ("GRID", (0,0), (-1,-1), 1, colors.black)
-    ]))
-
-    doc.build([table])
-    buffer.seek(0)
-
-    return send_file(buffer, as_attachment=True, download_name="sales.pdf")
-
-# =========================
-# Routes
-# =========================
+# 3. المسارات والتوجيهات (Routes)
 @app.route('/')
 def index():
-    data = get_all_sales()
-    chart_data = calculate_daily(data)
-
-    html = render_template_string(HOME, chart_data=chart_data)
-    return render_template_string(BASE, content=html)
+    sales = get_all_sales()
+    return render_template_string(HTML_TEMPLATE, sales=sales)
 
 @app.route('/add', methods=['POST'])
-def add():
+def add_sale():
     try:
-        product = request.form.get('product','').strip()
-        price = float(request.form.get('price') or 0)
-        cost = float(request.form.get('cost') or 0)
-
+        product = request.form.get('product')
+        price = request.form.get('price')
+        cost = request.form.get('cost')
+        
         if product:
             insert_sale(product, price, cost)
     except Exception as e:
         print("Add Error:", e)
-
     return redirect(url_for('index'))
 
 @app.route('/api')
 def api():
     return jsonify(get_all_sales())
 
-# =========================
-# TEST CASES
-# =========================
-# ✅ تشغيل بدون بيانات (لا crash)
-# ✅ chart_data = [] لا يسبب خطأ
-# ✅ إدخال بيانات صحيحة يظهر في chart
-# ✅ إدخال بيانات غير صالحة لا يكسر النظام
-# ✅ تصدير Excel يعمل
-# ✅ تصدير PDF يعمل
-# ✅ API يرجع JSON صحيح
+@app.route('/export/excel')
+def export_excel():
+    sales = get_all_sales()
+    si = io.StringIO()
+    cw = csv.writer(si)
+    # كتابة العناوين
+    cw.writerow(['المعرف', 'المنتج', 'سعر البيع', 'التكلفة', 'الربح الصافي', 'التاريخ'])
+    for s in sales:
+        cw.writerow([s['id'], s['product'], s['price'], s['cost'], s['profit'], s['date']])
+    
+    output = make_response(si.getvalue())
+    output.headers["Content-Disposition"] = "attachment; filename=sales_report.csv"
+    # utf-8-sig تضمن قراءة الحروف العربية بشكل سليم داخل Excel
+    output.headers["Content-type"] = "text/csv; charset=utf-8-sig"
+    return output
 
-# =========================
-# Run
-# =========================
+@app.route('/export/pdf')
+def export_pdf():
+    sales = get_all_sales()
+    # واجهة طباعة نظيفة ومحسنة كتقرير PDF جاهز للطباعة مباشرة
+    pdf_template = """
+    <!DOCTYPE html>
+    <html lang="ar" dir="rtl">
+    <head>
+        <meta charset="UTF-8">
+        <title>تقرير المبيعات المالي</title>
+        <style>
+            body { font-family: Arial, sans-serif; padding: 40px; }
+            h1 { text-align: center; color: #2c3e50; }
+            table { width: 100%; border-collapse: collapse; margin-top: 30px; }
+            th, td { border: 1px solid #333; padding: 10px; text-align: right; }
+            th { background-color: #f2f2f2; }
+        </style>
+    </head>
+    <body>
+        <h1>تقرير المبيعات والأرباح المالي</h1>
+        <table>
+            <thead>
+                <tr>
+                    <th>المعرف</th>
+                    <th>اسم المنتج</th>
+                    <th>سعر البيع</th>
+                    <th>التكلفة</th>
+                    <th>الربح الصافي</th>
+                    <th>التاريخ</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for sale in sales %}
+                <tr>
+                    <td>{{ sale.id }}</td>
+                    <td>{{ sale.product }}</td>
+                    <td>${{ sale.price }}</td>
+                    <td>${{ sale.cost }}</td>
+                    <td>${{ sale.profit }}</td>
+                    <td>{{ sale.date }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        <script>window.onload = function() { window.print(); }</script>
+    </body>
+    </html>
+    """
+    return render_template_string(pdf_template, sales=sales)
+
 if __name__ == '__main__':
     init_db()
     app.run(debug=True)
