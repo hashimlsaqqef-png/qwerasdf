@@ -35,6 +35,9 @@ def insert_sale(product, price, cost):
     conn.close()
 
 def get_all_sales():
+    # استدعاء دالة الإنشاء هنا يضمن عملها فوراً عند أي طلب تصفح للموقع ويمنع خطأ الـ HEAD تماماً
+    init_db()
+    
     conn = sqlite3.connect('sales.db')
     cursor = conn.cursor()
     cursor.execute('SELECT id, product, price, cost, profit, date FROM sales ORDER BY id DESC')
@@ -144,11 +147,9 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
-        // جلب البيانات للرسم البياني وتجنب خطأ [object Object]
         const salesData = {{ sales | tojson }};
         
         if (salesData.length > 0) {
-            // عكس المصفوفة ليعرض الرسم البياني من الأقدم إلى الأحدث
             const dataReversed = [...salesData].reverse();
             const labels = dataReversed.map(item => item.product);
             const profits = dataReversed.map(item => item.profit);
@@ -172,7 +173,6 @@ HTML_TEMPLATE = """
                 }
             });
         } else {
-            // في حال عدم وجود بيانات، يظهر رسم فارغ لطيف دون كسر الصفحة
             const ctx = document.getElementById('salesChart').getContext('2d');
             ctx.font = "16px sans-serif";
             ctx.fillStyle = "#7f8c8d";
@@ -212,21 +212,18 @@ def export_excel():
     sales = get_all_sales()
     si = io.StringIO()
     cw = csv.writer(si)
-    # كتابة العناوين
     cw.writerow(['المعرف', 'المنتج', 'سعر البيع', 'التكلفة', 'الربح الصافي', 'التاريخ'])
     for s in sales:
         cw.writerow([s['id'], s['product'], s['price'], s['cost'], s['profit'], s['date']])
     
     output = make_response(si.getvalue())
     output.headers["Content-Disposition"] = "attachment; filename=sales_report.csv"
-    # utf-8-sig تضمن قراءة الحروف العربية بشكل سليم داخل Excel
     output.headers["Content-type"] = "text/csv; charset=utf-8-sig"
     return output
 
 @app.route('/export/pdf')
 def export_pdf():
     sales = get_all_sales()
-    # واجهة طباعة نظيفة ومحسنة كتقرير PDF جاهز للطباعة مباشرة
     pdf_template = """
     <!DOCTYPE html>
     <html lang="ar" dir="rtl">
@@ -274,5 +271,4 @@ def export_pdf():
     return render_template_string(pdf_template, sales=sales)
 
 if __name__ == '__main__':
-    init_db()
     app.run(debug=True)
